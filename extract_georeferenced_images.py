@@ -18,6 +18,7 @@ VICARIUS Integration:
 import os
 import sys
 import argparse
+import json
 import time
 from pathlib import Path
 from datetime import datetime
@@ -67,6 +68,11 @@ def parse_args():
         nargs="?",
         default=".",
         help="Output directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--mission-json",
+        default=None,
+        help="Path to mission JSON file for waypoint speed overlay",
     )
     return parser.parse_args()
 
@@ -202,22 +208,64 @@ def export_metashape_csv(matched_df, output_path):
     return export_df
 
 
-def create_mission_map(pose_df, output_path, bag_name, stats):
-    """Create a map showing the mission path with statistics."""
+def create_mission_map(pose_df, output_path, bag_name, stats, mission_json=None):
+    """Create a map showing the mission path colored by speed, with statistics."""
     if pose_df.empty:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+    fig, axes = plt.subplots(1, 2, figsize=(20, 9),
+                              gridspec_kw={'width_ratios': [3, 1]})
 
-    # Left plot: Path map
+    # Left plot: Path map colored by speed
     ax1 = axes[0]
     lon = pose_df["x"].values
     lat = pose_df["y"].values
+    ts = pose_df["timestamp_ns"].values.astype(float)
 
-    # Color by time (index)
-    scatter = ax1.scatter(lon, lat, c=range(len(lon)), cmap='viridis', s=1, alpha=0.7)
+    # Compute speed from consecutive positions
+    dt = np.diff(ts) / 1e9  # seconds
+    cos_lat = np.cos(np.radians(np.mean(lat)))
+    dx = np.diff(lon) * 111000 * cos_lat  # meters
+    dy = np.diff(lat) * 111000  # meters
+    dist = np.sqrt(dx**2 + dy**2)
+    speed = np.where(dt > 0, dist / dt, 0.0)
+    # Append 0 for the last point so array matches lon/lat length
+    speed = np.append(speed, speed[-1] if len(speed) > 0 else 0.0)
+    # Smooth speed with rolling median to reduce GPS noise
+    speed = pd.Series(speed).rolling(window=15, center=True, min_periods=1).median().values
+
+    scatter = ax1.scatter(lon, lat, c=speed, cmap='plasma', s=1, alpha=0.7,
+                          vmin=0, vmax=1.0)
     ax1.plot(lon[0], lat[0], 'go', markersize=10, label='Start', zorder=5)
     ax1.plot(lon[-1], lat[-1], 'ro', markersize=10, label='End', zorder=5)
+
+    # Overlay mission waypoints with commanded speeds if JSON provided
+    if mission_json is not None:
+        try:
+            with open(mission_json, 'r') as f:
+                mission = json.load(f)
+            waypoints = mission.get("waypoints", [])
+            # Draw planned mission path as a connected line
+            wp_lons = [wp["longitude"] for wp in waypoints]
+            wp_lats = [wp["latitude"] for wp in waypoints]
+            ax1.plot(wp_lons, wp_lats, '--', color='white', linewidth=3.0, zorder=3)
+            ax1.plot(wp_lons, wp_lats, '--', color='limegreen', linewidth=1.8, zorder=3,
+                     label='Planned path')
+            # Draw waypoint markers and labels
+            for wp in waypoints:
+                wp_lon = wp["longitude"]
+                wp_lat = wp["latitude"]
+                wp_speed = wp["speed"]
+                ax1.plot(wp_lon, wp_lat, 'D', color='white', markersize=8,
+                         markeredgecolor='limegreen', markeredgewidth=1.5, zorder=4)
+                ax1.annotate(f'WP{wp["waypoint_number"]}\n{wp_speed:.2f} m/s',
+                             (wp_lon, wp_lat), textcoords="offset points",
+                             xytext=(8, 8), fontsize=7, fontweight='bold',
+                             bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                                       edgecolor='limegreen', alpha=0.8),
+                             zorder=7)
+        except Exception as e:
+            print(f"  Warning: Could not overlay mission waypoints: {e}")
 
     ax1.set_xlabel('Longitude')
     ax1.set_ylabel('Latitude')
@@ -225,11 +273,30 @@ def create_mission_map(pose_df, output_path, bag_name, stats):
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     ax1.set_aspect('equal')
-    plt.colorbar(scatter, ax=ax1, label='Time progression')
+    ax1.ticklabel_format(useOffset=False, style='plain')
+    plt.colorbar(scatter, ax=ax1, label='Speed (m/s)')
 
     # Right plot: Stats text
     ax2 = axes[1]
     ax2.axis('off')
+
+    # Duration in minutes.seconds
+    duration_min = int(stats['duration'] // 60)
+    duration_sec = stats['duration'] % 60
+
+    # Get set altitude from mission JSON if available
+    set_alt_str = "  Set Altitude: N/A"
+    if mission_json is not None:
+        try:
+            with open(mission_json, 'r') as f:
+                mission_data = json.load(f)
+            for wp in mission_data.get("waypoints", []):
+                alt = wp.get("additional_data", {}).get("Altitude")
+                if alt is not None:
+                    set_alt_str = f"  Set Altitude: {alt:.1f}m"
+                    break
+        except Exception:
+            pass
 
     stats_text = f"""
 MISSION STATISTICS
@@ -240,7 +307,7 @@ Bag File: {bag_name}
 TIME
   Start: {stats['start_time']}
   End: {stats['end_time']}
-  Duration: {stats['duration']:.1f} seconds
+  Duration: {duration_min}m {duration_sec:.1f}s
 
 LOCATION (WGS84)
   Longitude: {stats['lon_min']:.6f}° to {stats['lon_max']:.6f}°
@@ -250,17 +317,11 @@ LOCATION (WGS84)
 DEPTH / ALTITUDE
   DVL Altitude: {stats['alt_min']:.2f}m to {stats['alt_max']:.2f}m
   Mean Altitude: {stats['alt_mean']:.2f}m
+{set_alt_str}
 
-IMAGES EXTRACTED
-  Down camera: {stats['down_images']} images
-  Forward camera: {stats['forward_images']} images
-
-POSE DATA
-  Samples: {stats['pose_samples']}
-  Rate: {stats['pose_rate']:.1f} Hz
 """
 
-    ax2.text(0.05, 0.95, stats_text, transform=ax2.transAxes,
+    ax2.text(0.1, 0.95, stats_text, transform=ax2.transAxes,
              fontsize=10, verticalalignment='top', fontfamily='monospace',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
@@ -374,7 +435,7 @@ def main():
     # Create mission map
     print(f"\nGenerating mission map...")
     map_path = output_base / "mission_map.png"
-    create_mission_map(pose_df, str(map_path), bag_name, stats)
+    create_mission_map(pose_df, str(map_path), bag_name, stats, mission_json=args.mission_json)
     print(f"  Saved: {map_path}")
 
     # Print summary
