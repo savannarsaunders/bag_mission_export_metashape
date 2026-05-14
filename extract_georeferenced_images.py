@@ -381,8 +381,8 @@ def main():
     end_ts = pose_df["timestamp_ns"].max() / 1e9
 
     stats = {
-        "start_time": datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M:%S"),
-        "end_time": datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M:%S"),
+        "start_time": datetime.fromtimestamp(start_ts).strftime("%d %B %Y %H:%M:%S"),
+        "end_time": datetime.fromtimestamp(end_ts).strftime("%d %B %Y %H:%M:%S"),
         "duration": duration,
         "lon_min": pose_df["x"].min(),
         "lon_max": pose_df["x"].max(),
