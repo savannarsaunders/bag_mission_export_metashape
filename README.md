@@ -196,10 +196,75 @@ Set `compressed: True` for `sensor_msgs/CompressedImage` topics.
 **Problem:** Import errors
 **Solution:** Install dependencies: `pip install -r requirements.txt`
 
+## Companion scripts (CSV-driven, no `rosbags` required)
+
+Two helper scripts work off the already-exported `mission_travel_path.csv`
+files (one per timestamped mission folder) instead of the raw bag. They
+don't depend on `rosbags` or Python ≥ 3.10, so they're useful for quick
+batch reporting on a laptop without a ROS toolchain.
+
+Expected mission-root layout (one per dock/site visit):
+
+```
+<mission-root>/
+  DocSsur/                                   # bag dir (per mission name)
+    DocSsur_0_UTC_2026-06-24_16-31-35.bag
+  20260624123134-DocSsur/                    # exported mission folder
+    DocSsur.json
+    mission_travel_path.csv
+    mission_summary.json
+  ...
+```
+
+### `generate_mission_maps.py`
+
+Renders the same speed-colored path + planned-waypoint overlay + stats
+panel as `extract_georeferenced_images.py::create_mission_map`, but reads
+pose from `mission_travel_path.csv`. For each `.bag` under the
+`--bag-dirs` it finds the timestamped mission folder whose name suffix
+matches the bag's mission name and whose timestamp is within
+`--match-tolerance` seconds (after applying `--utc-offset-hours`), then
+writes `<bag-stem>_mission_map.png` into `--out`. Pass `--site-label` to
+render a `SITE` header above the `MISSION STATISTICS` block (e.g. so
+several dock visits to the same vehicle stay distinguishable in a report).
+
+```bash
+python generate_mission_maps.py \
+    "/path/to/24Jun2026_LemonDock" \
+    --site-label "Rangerbot: Lemon"
+# -> /path/to/24Jun2026_LemonDock/mission_maps/*_mission_map.png
+```
+
+### `generate_error_summary.py`
+
+Builds `mission_error_state_summary.docx` from every
+`mission_travel_path.csv` under the mission root. Finds contiguous runs of
+non-zero `errorState`, resolves the name from the RangerBot error-code
+table (`ERROR_NAMES` in the script, sourced from `RBerrorcodes.PDF`), and
+— for each error block — reconstructs the waypoint the vehicle was driving
+toward by replaying the GPS track against the mission plan's waypoint
+list, advancing whenever the vehicle enters that waypoint's capture
+radius. The "Patterns worth noting" bullets at the top are generated from
+the observed data (e.g. "all blocks at near-surface depth", "errorState=9
+is the only code observed"), so they describe each dataset rather than
+restating a template.
+
+```bash
+python generate_error_summary.py \
+    "/path/to/24Jun2026_LemonDock" \
+    --site-label "Rangerbot: Lemon" \
+    --dataset-label "24 June 2026, Lemon Dock"
+# -> /path/to/24Jun2026_LemonDock/mission_error_state_summary.docx
+```
+
+Both scripts only need `pandas`, `numpy`, `matplotlib`, and (for the
+summary doc) `python-docx` — all already listed in `requirements.txt`.
+
 ## Changelog
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.1.0 | 2026-06-24 | Add CSV-driven `generate_mission_maps.py` and `generate_error_summary.py` companion scripts |
 | 1.0.0 | 2026-02-04 | Initial VICARIUS integration |
 
 ## Related Documentation
