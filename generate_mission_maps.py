@@ -55,6 +55,18 @@ BAG_TS_RE = re.compile(
 FOLDER_TS_RE = re.compile(r"^(?P<ts>\d{14})-(?P<name>.+)$")
 
 
+def bag_utc_dt(bag_path: Path) -> Optional[datetime]:
+    """Parse the UTC datetime encoded in a bag filename, or None if absent."""
+    m = BAG_TS_RE.search(bag_path.name)
+    if not m:
+        return None
+    return datetime(
+        int(m["y"]), int(m["mo"]), int(m["d"]),
+        int(m["h"]), int(m["mi"]), int(m["s"]),
+        tzinfo=timezone.utc,
+    )
+
+
 def find_mission_folder(bag_path: Path, root: Path,
                         local_offset: timedelta,
                         tolerance_s: float) -> Optional[Path]:
@@ -199,11 +211,17 @@ def compute_waypoint_arrivals(pose_df: pd.DataFrame, waypoints: list) -> list:
 
 
 def create_mission_map(pose_df, output_path, bag_name, stats,
-                       mission_json=None, site_label: Optional[str] = None):
+                       mission_json=None, site_label: Optional[str] = None,
+                       display_name: Optional[str] = None):
     """Port of the upstream ``create_mission_map`` function. If ``site_label``
-    is provided, a ``SITE`` header is rendered at the top of the stats panel."""
+    is provided, a ``SITE`` header is rendered at the top of the stats panel.
+
+    ``display_name`` is the human-friendly mission label shown as the plot
+    title (e.g. ``"BITfW 1"``); it defaults to ``bag_name`` if not given. The
+    full bag file name is still recorded verbatim in the stats panel."""
     if pose_df.empty:
         return
+    title_name = display_name or bag_name
 
     fig, axes = plt.subplots(1, 2, figsize=(20, 9),
                              gridspec_kw={'width_ratios': [3, 1]})
@@ -277,7 +295,7 @@ def create_mission_map(pose_df, output_path, bag_name, stats,
 
     ax1.set_xlabel('Longitude')
     ax1.set_ylabel('Latitude')
-    ax1.set_title(f'Mission Path: {bag_name}')
+    ax1.set_title(f'Mission Path: {title_name}')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     ax1.set_aspect('equal')
@@ -385,7 +403,15 @@ def main() -> int:
         d = root / sub
         if not d.is_dir():
             continue
-        for bag in sorted(d.glob("*.bag")):
+        # Order this mission's bags by their actual UTC time so the display
+        # sequence number reflects run order (BITfW_0 -> "BITfW 1", etc.).
+        # Bags with unparseable names sort last, by filename. The index spans
+        # every bag in the dir, so a skipped bag still occupies its ordinal.
+        bags = sorted(d.glob("*.bag"),
+                      key=lambda b: (bag_utc_dt(b) is None, bag_utc_dt(b) or b.name))
+        for idx, bag in enumerate(bags, start=1):
+            mission_name = bag.stem.split("_")[0]
+            display_name = f"{mission_name} {idx}"
             folder = find_mission_folder(bag, root, local_offset,
                                          args.match_tolerance)
             if folder is None:
@@ -401,9 +427,11 @@ def main() -> int:
             out_path = out / f"{bag.stem}_mission_map.png"
             create_mission_map(pose_df, str(out_path), bag.stem, stats,
                                mission_json=str(mission_json) if mission_json else None,
-                               site_label=args.site_label)
+                               site_label=args.site_label,
+                               display_name=display_name)
             rows.append((bag.name, f"-> {out_path.name}",
-                         f"folder={folder.name} wp={'yes' if mission_json else 'no'}"))
+                         f"[{display_name}] folder={folder.name} "
+                         f"wp={'yes' if mission_json else 'no'}"))
 
     width = max(len(r[0]) for r in rows) if rows else 0
     print(f"{'BAG':<{width}}  RESULT")
