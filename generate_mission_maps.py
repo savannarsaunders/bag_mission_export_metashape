@@ -412,6 +412,9 @@ def main() -> int:
         for idx, bag in enumerate(bags, start=1):
             mission_name = bag.stem.split("_")[0]
             display_name = f"{mission_name} {idx}"
+            bdt = bag_utc_dt(bag)
+            date_str = ((bdt + local_offset).strftime("%d%b%Y")
+                        if bdt is not None else "unknown-date")
             folder = find_mission_folder(bag, root, local_offset,
                                          args.match_tolerance)
             if folder is None:
@@ -424,7 +427,7 @@ def main() -> int:
             mission_json = find_mission_json(folder)
             pose_df = load_pose_df(csv)
             stats = compute_stats(pose_df)
-            out_path = out / f"{bag.stem}_mission_map.png"
+            out_path = out / f"{date_str}_{mission_name}_{idx}_missionmap.png"
             create_mission_map(pose_df, str(out_path), bag.stem, stats,
                                mission_json=str(mission_json) if mission_json else None,
                                site_label=args.site_label,
