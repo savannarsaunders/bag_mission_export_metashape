@@ -153,6 +153,51 @@ def compute_stats(pose_df: pd.DataFrame) -> dict:
     }
 
 
+def compute_waypoint_arrivals(pose_df: pd.DataFrame, waypoints: list) -> list:
+    """For each planned waypoint, return the actual time the RangerBot reached
+    it, defined as the pose sample of closest approach (in metres).
+
+    Waypoints are matched in mission order: the search for waypoint *k* starts
+    at the pose sample where waypoint *k-1* was reached, so a later waypoint can
+    never bind to a pose sample the vehicle had already passed for an earlier
+    one (important when a survey path doubles back near an earlier target).
+
+    Returns a list aligned with ``waypoints``; each entry is a dict with
+    ``waypoint_number``, ``timestamp_ns`` (int), ``time_str`` (local HH:MM:SS),
+    and ``distance_m`` (closest-approach distance), or ``None`` if no pose
+    samples remain to search.
+    """
+    if pose_df.empty or not waypoints:
+        return [None] * len(waypoints)
+
+    lon = pose_df["x"].to_numpy(dtype=float)
+    lat = pose_df["y"].to_numpy(dtype=float)
+    ts_ns = pose_df["timestamp_ns"].to_numpy(dtype="int64")
+    cos_lat = np.cos(np.radians(np.nanmean(lat)))
+
+    arrivals = []
+    search_start = 0
+    n = len(pose_df)
+    for wp in waypoints:
+        if search_start >= n:
+            arrivals.append(None)
+            continue
+        dx = (lon[search_start:] - wp["longitude"]) * 111000 * cos_lat
+        dy = (lat[search_start:] - wp["latitude"]) * 111000
+        d = np.sqrt(dx * dx + dy * dy)
+        j = int(np.argmin(d))
+        idx = search_start + j
+        t_ns = int(ts_ns[idx])
+        arrivals.append({
+            "waypoint_number": wp.get("waypoint_number"),
+            "timestamp_ns": t_ns,
+            "time_str": datetime.fromtimestamp(t_ns / 1e9).strftime("%H:%M:%S"),
+            "distance_m": float(d[j]),
+        })
+        search_start = idx  # keep arrivals monotonic in time
+    return arrivals
+
+
 def create_mission_map(pose_df, output_path, bag_name, stats,
                        mission_json=None, site_label: Optional[str] = None):
     """Port of the upstream ``create_mission_map`` function. If ``site_label``
@@ -182,28 +227,51 @@ def create_mission_map(pose_df, output_path, bag_name, stats,
     ax1.plot(lon[0], lat[0], 'go', markersize=10, label='Start', zorder=5)
     ax1.plot(lon[-1], lat[-1], 'ro', markersize=10, label='End', zorder=5)
 
+    arrival_block = ""  # filled below; rendered in the stats panel
     if mission_json is not None:
         try:
             with open(mission_json, 'r') as f:
                 mission = json.load(f)
             waypoints = mission.get("waypoints", [])
+            arrivals = compute_waypoint_arrivals(pose_df, waypoints)
             wp_lons = [wp["longitude"] for wp in waypoints]
             wp_lats = [wp["latitude"] for wp in waypoints]
             ax1.plot(wp_lons, wp_lats, '--', color='white', linewidth=3.0, zorder=3)
             ax1.plot(wp_lons, wp_lats, '--', color='limegreen', linewidth=1.8, zorder=3,
                      label='Planned path')
-            for wp in waypoints:
+            for wp, arr in zip(waypoints, arrivals):
                 wp_lon = wp["longitude"]
                 wp_lat = wp["latitude"]
                 wp_speed = wp["speed"]
+                arr_str = f"\n@ {arr['time_str']}" if arr else ""
                 ax1.plot(wp_lon, wp_lat, 'D', color='white', markersize=8,
                          markeredgecolor='limegreen', markeredgewidth=1.5, zorder=4)
-                ax1.annotate(f'WP{wp["waypoint_number"]}\n{wp_speed:.2f} m/s',
+                ax1.annotate(f'WP{wp["waypoint_number"]}\n{wp_speed:.2f} m/s{arr_str}',
                              (wp_lon, wp_lat), textcoords="offset points",
                              xytext=(8, 8), fontsize=7, fontweight='bold',
                              bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
                                        edgecolor='limegreen', alpha=0.8),
                              zorder=7)
+
+            # Build the "WAYPOINT ARRIVALS" table for the stats panel.
+            arrival_lines = []
+            for arr in arrivals:
+                if not arr:
+                    continue
+                flag = "  *" if arr["distance_m"] > 3.0 else ""
+                arrival_lines.append(
+                    f"  WP{arr['waypoint_number']:<3} {arr['time_str']}"
+                    f"  ({arr['distance_m']:.1f}m){flag}"
+                )
+            if arrival_lines:
+                arrival_block = (
+                    "WAYPOINT ARRIVALS (local)\n"
+                    + "=" * 40 + "\n\n"
+                    + "\n".join(arrival_lines)
+                    + "\n\n  (time = closest approach on actual track;\n"
+                    + "   value in () is closest-approach distance,\n"
+                    + "   * = never came within 3 m of the waypoint)\n"
+                )
         except Exception as e:
             print(f"  Warning: Could not overlay mission waypoints: {e}")
 
@@ -265,7 +333,7 @@ DEPTH / ALTITUDE
   Mean Altitude: {stats['alt_mean']:.2f}m
 {set_alt_str}
 
-"""
+{arrival_block}"""
 
     ax2.text(0.1, 0.95, stats_text, transform=ax2.transAxes,
              fontsize=10, verticalalignment='top', fontfamily='monospace',
