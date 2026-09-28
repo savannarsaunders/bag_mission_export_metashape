@@ -302,7 +302,7 @@ def create_mission_map(pose_df, output_path, bag_name, stats,
     speed = pd.Series(speed).rolling(window=15, center=True, min_periods=1).median().values
 
     scatter = ax1.scatter(lon, lat, c=speed, cmap='plasma', s=1, alpha=0.7,
-                          vmin=0, vmax=1.6)
+                          vmin=0, vmax=1.0)
     ax1.plot(lon[0], lat[0], 'go', markersize=10, label='Start', zorder=5)
     ax1.plot(lon[-1], lat[-1], 'ro', markersize=10, label='End', zorder=5)
 
