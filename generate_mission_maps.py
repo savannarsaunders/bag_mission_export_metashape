@@ -46,6 +46,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.text import Text
 
 DEFAULT_BAG_DIRS = ("DocSsub", "DocSsubm", "DocSsur", "GOTO")
 
@@ -165,6 +166,66 @@ def compute_stats(pose_df: pd.DataFrame) -> dict:
     }
 
 
+def place_labels_without_overlap(fig, ax, labels) -> None:
+    """Move each annotation to the nearest offset where its box overlaps no
+    other waypoint label or waypoint marker and stays inside the axes."""
+    if not labels:
+        return
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    ax_box = ax.get_window_extent(renderer)
+    pad = 3  # px clearance between boxes
+    marker_r = 7  # px half-size of the waypoint diamond
+
+    anchors = [ax.transData.transform(a.xy) for a in labels]
+    obstacles = [(x - marker_r, y - marker_r, x + marker_r, y + marker_r)
+                 for x, y in anchors]
+
+    def box_of(a):
+        # Text-only extent (excludes the leader line); recomputed from the
+        # current xyann, then grown by the bbox padding + clearance.
+        a.update_positions(renderer)
+        bb = Text.get_window_extent(a, renderer)
+        grow = pad + 4
+        return (bb.x0 - grow, bb.y0 - grow, bb.x1 + grow, bb.y1 + grow)
+
+    def hits(b, others):
+        return any(b[0] < o[2] and b[2] > o[0] and b[1] < o[3] and b[3] > o[1]
+                   for o in others)
+
+    def inside(b):
+        return (b[0] >= ax_box.x0 and b[2] <= ax_box.x1 and
+                b[1] >= ax_box.y0 and b[3] <= ax_box.y1)
+
+    # Candidate offsets (points): 8 directions at increasing radius.
+    candidates = []
+    for r in (8, 20, 35, 50, 70, 95, 125):
+        for ang in (45, 135, 315, 225, 90, 270, 0, 180, 22, 158, 338, 202):
+            dx, dy = r * np.cos(np.radians(ang)), r * np.sin(np.radians(ang))
+            candidates.append((dx, dy))
+
+    placed = []
+    for a in labels:
+        best = None
+        for dx, dy in candidates:
+            # Anchor the box's nearest corner/edge toward the waypoint.
+            a.set_ha('left' if dx > 1 else 'right' if dx < -1 else 'center')
+            a.set_va('bottom' if dy > 1 else 'top' if dy < -1 else 'center')
+            a.xyann = (dx, dy)
+            b = box_of(a)
+            if inside(b) and not hits(b, placed) and not hits(b, obstacles):
+                best = b
+                break
+        if best is None:  # nothing fully clear; fall back to first candidate
+            dx, dy = candidates[0]
+            a.set_ha('left'); a.set_va('bottom'); a.xyann = (dx, dy)
+            best = box_of(a)
+        # Hide the leader line when the box sits right next to its point.
+        if np.hypot(*a.xyann) <= 10:
+            a.arrow_patch.set_visible(False)
+        placed.append(best)
+
+
 def compute_waypoint_arrivals(pose_df: pd.DataFrame, waypoints: list) -> list:
     """For each planned waypoint, return the actual time the RangerBot reached
     it, defined as the pose sample of closest approach (in metres).
@@ -241,11 +302,12 @@ def create_mission_map(pose_df, output_path, bag_name, stats,
     speed = pd.Series(speed).rolling(window=15, center=True, min_periods=1).median().values
 
     scatter = ax1.scatter(lon, lat, c=speed, cmap='plasma', s=1, alpha=0.7,
-                          vmin=0, vmax=1.6)
+                          vmin=0, vmax=1.0)
     ax1.plot(lon[0], lat[0], 'go', markersize=10, label='Start', zorder=5)
     ax1.plot(lon[-1], lat[-1], 'ro', markersize=10, label='End', zorder=5)
 
     arrival_block = ""  # filled below; rendered in the stats panel
+    wp_labels = []  # waypoint annotations, de-overlapped before saving
     if mission_json is not None:
         try:
             with open(mission_json, 'r') as f:
@@ -261,15 +323,19 @@ def create_mission_map(pose_df, output_path, bag_name, stats,
                 wp_lon = wp["longitude"]
                 wp_lat = wp["latitude"]
                 wp_speed = wp["speed"]
-                arr_str = f"\n@ {arr['time_str']}" if arr else ""
+                wp_type = wp.get("additional_data", {}).get("transect_type")
+                type_str = f"\n{wp_type}" if wp_type else ""
                 ax1.plot(wp_lon, wp_lat, 'D', color='white', markersize=8,
                          markeredgecolor='limegreen', markeredgewidth=1.5, zorder=4)
-                ax1.annotate(f'WP{wp["waypoint_number"]}\n{wp_speed:.2f} m/s{arr_str}',
-                             (wp_lon, wp_lat), textcoords="offset points",
-                             xytext=(8, 8), fontsize=7, fontweight='bold',
-                             bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
-                                       edgecolor='limegreen', alpha=0.8),
-                             zorder=7)
+                wp_labels.append(ax1.annotate(
+                    f'WP{wp["waypoint_number"]}\n{wp_speed:.2f} m/s{type_str}',
+                    (wp_lon, wp_lat), textcoords="offset points",
+                    xytext=(8, 8), fontsize=7, fontweight='bold',
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                              edgecolor='limegreen', alpha=0.8),
+                    arrowprops=dict(arrowstyle='-', color='limegreen', lw=0.8,
+                                    shrinkA=0, shrinkB=4),
+                    zorder=7))
 
             # Build the "WAYPOINT ARRIVALS" table for the stats panel.
             arrival_lines = []
@@ -358,6 +424,7 @@ DEPTH / ALTITUDE
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     plt.tight_layout()
+    place_labels_without_overlap(fig, ax1, wp_labels)
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
 
