@@ -227,6 +227,10 @@ matches the bag's mission name and whose timestamp is within
 writes `<bag-stem>_mission_map.png` into `--out`. Pass `--site-label` to
 render a `SITE` header above the `MISSION STATISTICS` block (e.g. so
 several dock visits to the same vehicle stay distinguishable in a report).
+Each planned waypoint is labelled with its number, speed, and whether the
+mission plan designates it a `Surface` or `Submarine` point (`transect_type`);
+labels are auto-placed so no two boxes overlap, with a leader line back to the
+waypoint when a label has to be moved away from it.
 
 ```bash
 python generate_mission_maps.py \
